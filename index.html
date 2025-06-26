@@ -4,13 +4,12 @@
   <meta charset="UTF-8" />
   <title>Queue-Monitor Scheduler</title>
 
-  <!-- Helper libs -->
+  <!-- helper libs -->
   <script defer src="https://cdn.jsdelivr.net/npm/ics/dist/ics.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.5.28/dist/jspdf.plugin.autotable.min.js"></script>
 
-  <!-- Styles (tiny) -->
   <style>
     body{font-family:Arial,Helvetica,sans-serif;margin:32px;max-width:1400px}
     table{border-collapse:collapse;width:100%;margin-top:12px}
@@ -23,12 +22,19 @@
     .gap-row{background:#ffecec;color:#b00;font-weight:bold}
   </style>
 
-  <!-- Main logic -->
   <script defer src="app.js"></script>
 </head>
 <body>
 <h1>Queue-Monitor Scheduler</h1>
-<p>1️⃣ Tick availability • 2️⃣ Drag to re-order • 3️⃣ Choose params • 4️⃣ Generate → Save / Export</p>
+<p>Pick a manager → tweak availability → Generate → Save / Export.</p>
+
+<!-- Manager picker -->
+<div class="controls">
+  Manager
+  <select id="manager-select">
+    <option value="">-- choose team lead --</option>
+  </select>
+</div>
 
 <!-- Roster builder -->
 <div id="team-form" class="controls">
@@ -36,7 +42,7 @@
   <button id="add-member" type="button">+ Add Member</button>
 </div>
 
-<!-- Config controls -->
+<!-- Global controls -->
 <div class="controls">
   Order <select id="order-mode"><option>list</option><option>random</option></select>
   Strategy <select id="strategy-mode"><option value="fair">fair</option><option value="round">round</option></select>
