@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Queue‑Monitor Scheduler</title>
+  <!-- External libs (all pure‑frontend, self‑host CDN links if desired) -->
+  <script src="https://cdn.jsdelivr.net/npm/ics/dist/ics.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;margin:32px;max-width:1400px}
+    h1,h2{margin-top:1.4em}
+    table{border-collapse:collapse;width:100%;margin-top:12px}
+    th,td{border:1px solid #aaa;padding:6px 8px;text-align:center}
+    th{background:#f4f4f4}
+    .member-row{display:flex;gap:6px;align-items:center;padding:6px;border:1px dashed transparent;margin-bottom:4px}
+    .dragging{opacity:.5}
+    .over{border-color:#66a}
+    #shift-times ul{columns:2 300px;column-gap:32px;padding-left:20px}
+    #pipe-output{white-space:pre;border:1px solid #ddd;padding:10px;background:#fafafa;margin-top:12px;display:none}
+    .controls>label{margin-right:14px}
+    .gap-row{background:#ffecec;color:#b00;font-weight:bold}
+    button{cursor:pointer}
+  </style>
+</head>
+<body>
+<h1>Queue‑Monitor Scheduler</h1>
+<p>
+  1️⃣ Tick who’s <strong>available</strong>, edit names or hours.<br>
+  2️⃣ Drag rows to set order (optional).<br>
+  3️⃣ Pick <strong>Order</strong>, <strong>Strategy</strong>, slot <strong>Lengths</strong>, <strong>Output</strong>.<br>
+  4️⃣ Click <em>Generate</em>.  ➡️  Save / export / share as needed.
+</p>
+
+<!-- Roster builder -->
+<div id="team-form" class="controls">
+  <h2>Team availability &amp; hours <small>(ET)</small></h2>
+  <!-- rows injected here -->
+  <button id="add-member" type="button">+ Add Member</button>
+</div>
+
+<!-- Global controls -->
+<div class="controls">
+  <label>Order:
+    <select id="order-mode"><option value="list">List order</option><option value="random">Random</option></select></label>
+  <label>Strategy:
+    <select id="strategy-mode"><option value="fair">Fair‑share</option><option value="round">Round‑robin</option></select></label>
+  <label>Morning slot (min):
+    <input type="number" id="morning-len" value="6" min="1" max="60" style="width:60px"></label>
+  <label>Afternoon slot (min):
+    <input type="number" id="afternoon-len" value="15" min="1" max="60" style="width:60px"></label>
+  <label>Output:
+    <select id="output-mode"><option value="table">Table</option><option value="pipe">Pipe text</option></select></label>
+</div>
+
+<button id="generate" type="button">Generate Schedule</button>
+<button id="save-day" type="button" disabled>💾 Save (day)</button>
+<select id="history-select"><option value="">Load previous…</option></select>
+<button id="export-ics" type="button" disabled>📅 iCal</button>
+<button id="export-xlsx" type="button" disabled>📄 XLSX</button>
+<button id="export-pdf" type="button" disabled>🖨️ PDF</button>
+
+<!-- Schedule table -->
+<h2>Schedule <button id="copy-table" type="button" style="display:none">Copy Table</button></h2>
+<table id="schedule-table"><thead><tr><th>Person</th><th>Start</th><th>End</th><th>Duration</th><th>Next&nbsp;Shift</th></tr></thead><tbody></tbody></table>
+<pre id="pipe-output"></pre>
+
+<!-- Summary -->
+<h2>Summary</h2>
+<table id="summary-table"><thead><tr><th>Person</th><th># Shifts</th><th>Total Minutes</th></tr></thead><tbody></tbody></table>
+
+<!-- Shift times list -->
+<h2>Shift Times by Person</h2>
+<div id="shift-times"></div>
+
+<script>
+/************ Helpers *************/
+const toM = t=>{const[H,M]=t.split(':').map(Number);return H*60+M};
+const fm  = m=>`${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`;
+const todayKey=()=>new Date().toISOString().slice(0,10);
+
+/************ Roster builder *************/
+const formDiv=document.getElementById('team-form');
+const defaultTeam=[['Anish','09:00','18:00'],['Ashish','07:30','16:30'],['Chetan','09:00','18:00'],['Dany','07:30','16:30'],['Franky','07:30','16:30'],['Kartik','07:30','16:30'],['Priya','07:30','16:30'],['Rajni','09:00','18:00'],['Sarthak','07:30','16:30'],['Shalini','07:30','16:30'],['Tapaswini','13:00','21:00']];
+let dragEl=null;
+function makeRow(name='',s='09:00',e='17:00'){
+  const row=document.createElement('div');row.className='member-row';
+  row.innerHTML=`<label><input type=checkbox class=avail checked></label>
+    <input class=pname style="width:120px" value="${name}" placeholder="Name">
+    Start:<input type=time class=pstart value="${s}">
+    End:<input type=time class=pend value="${e}">`;
+  row.draggable=true;
+  row.ondragstart=ev=>{dragEl=row;row.classList.add('dragging');ev.dataTransfer.effectAllowed='move'};
+  row.ondragover=ev=>{ev.preventDefault();row.classList.add('over')};
+  row.ondragleave=()=>row.classList.remove('over');
+  row.ondrop=()=>{if(dragEl!==row)formDiv.insertBefore(dragEl,row.nextSibling);row.classList.remove('over')};
+  row.ondragend=()=>{row.classList.remove('dragging');document.querySelectorAll('.over').forEach(e=>e.classList.remove('over'))};
+  formDiv.insertBefore(row,document.getElementById('add-member'));
+}
+
+defaultTeam.forEach(d=>makeRow(...d));
+document.getElementById('add-member').onclick=()=>makeRow();
+
+/************ Core generation *************/
+let rotateIdx=0,currentSchedule=[];
+const genBtn=document.getElementById('generate');
+
+function buildSchedule(){
+  const roster=[...document.querySelectorAll('.member-row')].filter(r=>r.querySelector('.avail').checked).map(r=>({
+    name:r.querySelector('.pname').value.trim()||'Unnamed',
+    start:toM(r.querySelector('.pstart').value),
+    end:toM(r.querySelector('.pend').value)}));
+  if(!roster.length){alert('No members');return null;}
+
+  let order=[...roster];
+  if(document.getElementById('order-mode').value==='random')
+    for(let i=order.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[order[i],order[j]]=[order[j],order[i]];}
+  else{const rot=rotateIdx%roster.length;rotateIdx++;order=roster.slice(rot).concat(roster.slice(0,rot));}
+
+  const mLen=parseInt(document.getElementById('morning-len').value,10)||6;
+  const aLen=parseInt(document.getElementById('afternoon-len').value,10)||15;
+  const strat=document.getElementById('strategy-mode').value;
+  const earliest=Math.min(...roster.map(r=>r.start));
+  const latest=Math.max(...roster.map(r=>r.end));
+  const sched=[], totals=Object.fromEntries(roster.map(r=>[r.name,0]));
+
+  let cur=earliest,idx=0;
+  while(cur<latest){
+    const slot=cur<720?mLen:aLen;
+    const candidates=order.filter(p=>p.start<=cur&&p.end>=cur+slot);
+    if(!candidates.length){cur=Math.min(...roster.filter(p=>p.start>cur).map(p=>p.start).concat([latest]));continue;}
+
+    let chosen;
+    if(strat==='round'){
+      chosen=candidates.find(p=>p===order[idx%order.length])||candidates[0];
+      idx=(order.indexOf(chosen)+1)%order.length;
+    }else{
+      candidates.sort((a,b)=>totals[a.name]-totals[b.name]||order.indexOf(a)-order.indexOf(b));
+      chosen=candidates[0];
+    }
+    sched.push({name:chosen.name,start:cur,end:cur+slot,duration:slot});
+    totals[chosen.name]+=slot;cur+=slot;
+  }
+  return {sched,totals};
+}
+
+function render({sched,totals}){
+  currentSchedule=sched; // keep global copy
+  // next shift calc & per‑times
+  const nextMap={},perTimes={},summary={};
+  sched.forEach((s,i)=>{if(nextMap[s.name]!=null)sched[nextMap[s.name]].next=fm(s.start);nextMap[s.name]=i;s.next='-';
+    perTimes[s.name]=perTimes[s.name]||[];perTimes[s.name].push(fm(s.start));
+    summary[s.name]=summary[s.name]||{cnt:0,mins:0};summary[s.name].cnt++;summary[s.name].mins+=s.duration;});
+
+  // schedule table
+  const tb=document.querySelector('#schedule-table tbody');tb.innerHTML='';
+  const gaps=[];
+  sched.forEach(s=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${s.name}</td><td>${fm(s.start)}</td><td>${fm(s.end)}</td><td>${s.duration}</td><td>${s.next}</td>`;tb.appendChild(tr);});
+  // highlight gap rows (if cur jumps) – simpler: we detect by comparing contiguous times
+  for(let i=1;i<sched.length;i++)if(sched[i].start>sched[i-1].end){const gapTr=document.createElement('tr');gapTr.className='gap-row';gapTr.innerHTML=`<td colspan=5>*** GAP ${fm(sched[i-1].end)}‑${fm(sched[i].start)} ***</td>`;tb.insertBefore(gapTr,tb.children[i+gaps.length]);gaps.push(gapTr);}
+
+  // summary
+  const sb=document.querySelector('#summary-table tbody');sb.innerHTML='';
+  Object.keys(summary).sort().forEach(n=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${n}</td><td>${summary[n].cnt}</td><td>${summary[n].mins}</td>`;sb.appendChild(tr);});
+
+  // shift times list
+  const stDiv=document.getElementById('shift-times');stDiv.innerHTML='';const ul=document.createElement('ul');
+  Object.keys(perTimes).sort().forEach(n=>{const li=document.createElement('li');li.textContent=`${n}: ${perTimes[n].join(', ')}`;ul.appendChild(li);});
+  stDiv.appendChild(ul);
+
+  // pipe output or table visibility
+  const pipe=document.getElementById('pipe-output');const copyBtn=document.getElementById('copy-table');
+  if(document.getElementById('output-mode').value==='table'){document.getElementById('schedule-table').style.display='';pipe.style.display='none';copyBtn.style.display='inline-block';}
+  else{document.getElementById('schedule-table').style.display='none';copyBtn.style.display='none';pipe.style.display='block';pipe.textContent=sched.map(s=>`${s.name}|${fm(s.start)}|${fm(s.end)}|${s.duration}|${s.next}`).join('\n');}
+
+  // enable export/save buttons
+  ['save-day','export-ics','export-xlsx','export-pdf'].forEach(id=>document.getElementById(id).disabled=false);
+}
+
+genBtn.onclick=()=>{const res=buildSchedule();if(res)render(res);};// generate & render
+
+document.getElementById('copy-table').onclick=()=>{
+  const rows=[...document.querySelectorAll('#schedule-table tr')].map(r=>[...r.children].map(c=>c.textContent).join('\t')).join('\n');
+  navigator.clipboard.writeText(rows).then(()=>alert('Copied table'));
+};
+
+/************ Persistence (localStorage) *************/
+function saveToday(){localStorage.setItem(`sched-${todayKey()}`,JSON.stringify(currentSchedule));refreshHistory();alert('Saved');}
+function refreshHistory(){const sel=document.getElementById('history-select');sel.innerHTML='<option value="">Load previous…</option>';Object.keys(localStorage).filter(k=>k.startsWith('sched-')).sort().forEach(k=>{const d=k.slice(6);const o=document.createElement('option');o.value=d;o.textContent=d;sel.appendChild(o);});}
+refreshHistory();
+
+document.getElementById('save-day').onclick=saveToday;
+document.getElementById('history-select').onchange=e=>{
+  const d=e.target.value;if(!d)return;const data=JSON.parse(localStorage.getItem(`sched-${d}`)||'[]');if(!data.length)return alert('No data');render({sched:data,totals:{}});
+};
+
+/************ iCal export *************/
+function exportICS(){const {ics}=window;const cal=new ics();currentSchedule.forEach((s,i)=>{const d=new Date();d.setHours(Math.floor(s.start/60),s.start%60,0,0);const e=new Date();e.setHours(Math.floor(s.end/60),s.end%60,0,0);cal.addEvent(s.name+' queue',`Shift ${i+1}`, '', d, e);});cal.download(`queue-${todayKey()}`);}document.getElementById('export-ics').onclick=exportICS;
+
+/************ XLSX export *************/
+function exportXLSX(){const ws=XLSX.utils.json_to_sheet(currentSchedule.map(s=>({Person:s.name,Start:fm(s.start),End:fm(s.end),Minutes:s.duration})));
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Schedule');XLSX.writeFile(wb,`queue-${todayKey()}.xlsx`);}document.getElementById('export-xlsx').onclick=exportXLSX;
+
+/************ PDF export (simple) *************/
+async function exportPDF(){const {{jsPDF}}=window.jspdf;const doc=new jsPDF();doc.text(`Queue Schedule ${todayKey()}`,14,14);let y=24;currentSchedule.forEach(s=>{doc.text(`${s.name}  ${fm(s.start)}‑${fm(s.end)}  ${s.duration}m`,14,y);y+=6;if(y>270){doc.addPage();y=20;}});doc.save(`queue-${todayKey()}.pdf`);}document.getElementById('export-pdf').onclick=exportPDF;
+</script>
+</body>
+</html>
