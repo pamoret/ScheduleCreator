@@ -3,27 +3,24 @@
 <head>
   <meta charset="UTF-8" />
   <title>Queue‑Monitor Scheduler</title>
-  <!-- Optional helper libs (swap to local copies if you prefer) -->
+
+  <!-- Optional helper libs (use local copies if you prefer) -->
   <script defer src="https://cdn.jsdelivr.net/npm/ics/dist/ics.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/modern-normalize/modern-normalize.min.css">
-  <link rel="stylesheet" href="styles.css"><!-- optional custom styles -->
+
+  <!-- Minimal styling -->
   <style>
     body{font-family:Arial,Helvetica,sans-serif;margin:32px;max-width:1400px}
-    h1,h2{margin-top:1.3em}
     table{border-collapse:collapse;width:100%;margin-top:12px}
     th,td{border:1px solid #aaa;padding:6px 8px;text-align:center}
     th{background:#f4f4f4}
-    .member-row{display:flex;gap:6px;align-items:center;padding:6px;border:1px dashed transparent;margin-bottom:4px}
+    .member-row{display:flex;gap:6px;align-items:center;padding:6px;border:1px dashed #ccc;margin-bottom:4px}
     .dragging{opacity:.5}
     .over{border-color:#66a}
     #pipe-output{white-space:pre;border:1px solid #ddd;background:#fafafa;padding:10px;margin-top:12px;display:none}
-    #shift-times ul{columns:2 300px;-webkit-columns:2 300px;column-gap:32px;padding-left:20px}
-    .controls label{margin-right:14px}
-    .gap-row{background:#ffecec;color:#b00;font-weight:bold}
   </style>
-  <!-- load app logic -->
+  <!-- App logic -->
   <script defer src="app.js"></script>
 </head>
 <body>
@@ -32,28 +29,21 @@
 
 <!-- Roster builder -->
 <div id="team-form" class="controls">
-  <h2>Team availability &amp; hours <small>(ET)</small></h2>
-  <button id="add-member" type="button">+ Add Member</button>
+  <h2>Team availability &amp; hours (ET)</h2>
+  <!-- Member rows injected by JS -->
+  <button id="add-member" type="button">+ Add Member</button>
 </div>
 
-<!-- Global controls -->
+<!-- Controls -->
 <div class="controls">
-  <label>Order:
-    <select id="order-mode"><option value="list">List order</option><option value="random">Random</option></select></label>
-  <label>Strategy:
-    <select id="strategy-mode"><option value="fair">Fair-share</option><option value="round">Round-robin</option></select></label>
-  <label>Morning slot (min): <input type="number" id="morning-len" value="6" min="1" max="60" style="width:60px"></label>
-  <label>Afternoon slot (min): <input type="number" id="afternoon-len" value="15" min="1" max="60" style="width:60px"></label>
-  <label>Output:
-    <select id="output-mode"><option value="table">Table</option><option value="pipe">Pipe</option></select></label>
+  Order <select id="order-mode"><option>list</option><option>random</option></select>
+  Strategy <select id="strategy-mode"><option value="fair">fair</option><option value="round">round</option></select>
+  Morning <input id="morning-len" type="number" value="6" style="width:60px"> min
+  Afternoon <input id="afternoon-len" type="number" value="15" style="width:60px"> min
+  Output <select id="output-mode"><option>table</option><option>pipe</option></select>
 </div>
 
 <button id="generate">Generate</button>
-<button id="save-day" disabled>💾 Save</button>
-<select id="history-select"><option value="">Load previous…</option></select>
-<button id="export-ics" disabled>📅 iCal</button>
-<button id="export-xlsx" disabled>📄 XLSX</button>
-<button id="export-pdf" disabled>🖨️ PDF</button>
 
 <h2>Schedule <button id="copy-table" style="display:none">Copy</button></h2>
 <table id="schedule-table"><thead><tr><th>Person</th><th>Start</th><th>End</th><th>Min</th><th>Next</th></tr></thead><tbody></tbody></table>
@@ -62,7 +52,7 @@
 <h2>Summary</h2>
 <table id="summary-table"><thead><tr><th>Person</th><th>#</th><th>Minutes</th></tr></thead><tbody></tbody></table>
 
-<h2>Shift Times by Person</h2>
+<h2>Shift Times by Person</h2>
 <div id="shift-times"></div>
 </body>
 </html>
