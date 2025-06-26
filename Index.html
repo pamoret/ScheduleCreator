@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <title>Queue‑Monitor Scheduler</title>
-  <!-- External libs (all pure‑frontend, self‑host CDN links if desired) -->
+  <!-- External libs (optional self‑host) -->
   <script src="https://cdn.jsdelivr.net/npm/ics/dist/ics.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
@@ -75,13 +75,15 @@
 
 <script>
 /************ Helpers *************/
-const toM = t=>{const[H,M]=t.split(':').map(Number);return H*60+M};
-const fm  = m=>`${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`;
+const toM=t=>{const[H,M]=t.split(':').map(Number);return H*60+M};
+const fm=m=>`${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`;
 const todayKey=()=>new Date().toISOString().slice(0,10);
+
+/************ Default team *************/
+const defaultTeam=[['Anish','09:00','18:00'],['Ashish','07:30','16:30'],['Chetan','09:00','18:00'],['Dany','07:30','16:30'],['Franky','07:30','16:30'],['Kartik','07:30','16:30'],['Priya','07:30','16:30'],['Rajni','09:00','18:00'],['Sarthak','07:30','16:30'],['Shalini','07:30','16:30'],['Tapaswini','13:00','21:00']];
 
 /************ Roster builder *************/
 const formDiv=document.getElementById('team-form');
-const defaultTeam=[['Anish','09:00','18:00'],['Ashish','07:30','16:30'],['Chetan','09:00','18:00'],['Dany','07:30','16:30'],['Franky','07:30','16:30'],['Kartik','07:30','16:30'],['Priya','07:30','16:30'],['Rajni','09:00','18:00'],['Sarthak','07:30','16:30'],['Shalini','07:30','16:30'],['Tapaswini','13:00','21:00']];
 let dragEl=null;
 function makeRow(name='',s='09:00',e='17:00'){
   const row=document.createElement('div');row.className='member-row';
@@ -98,13 +100,15 @@ function makeRow(name='',s='09:00',e='17:00'){
   formDiv.insertBefore(row,document.getElementById('add-member'));
 }
 
-defaultTeam.forEach(d=>makeRow(...d));
 document.getElementById('add-member').onclick=()=>makeRow();
 
-/************ Core generation *************/
-let rotateIdx=0,currentSchedule=[];
-const genBtn=document.getElementById('generate');
+// Load default names once DOM content is ready and only if none exist yet
+window.addEventListener('DOMContentLoaded',()=>{
+  if(!formDiv.querySelector('.member-row')) defaultTeam.forEach(d=>makeRow(...d));
+});
 
+/************ Core generation (unchanged) *************/
+let rotateIdx=0,currentSchedule=[];
 function buildSchedule(){
   const roster=[...document.querySelectorAll('.member-row')].filter(r=>r.querySelector('.avail').checked).map(r=>({
     name:r.querySelector('.pname').value.trim()||'Unnamed',
@@ -122,87 +126,29 @@ function buildSchedule(){
   const strat=document.getElementById('strategy-mode').value;
   const earliest=Math.min(...roster.map(r=>r.start));
   const latest=Math.max(...roster.map(r=>r.end));
-  const sched=[], totals=Object.fromEntries(roster.map(r=>[r.name,0]));
+  const sched=[],totals=Object.fromEntries(roster.map(r=>[r.name,0]));
 
   let cur=earliest,idx=0;
   while(cur<latest){
     const slot=cur<720?mLen:aLen;
-    const candidates=order.filter(p=>p.start<=cur&&p.end>=cur+slot);
-    if(!candidates.length){cur=Math.min(...roster.filter(p=>p.start>cur).map(p=>p.start).concat([latest]));continue;}
-
+    const cands=order.filter(p=>p.start<=cur&&p.end>=cur+slot);
+    if(!cands.length){cur=Math.min(...roster.filter(p=>p.start>cur).map(p=>p.start).concat([latest]));continue;}
     let chosen;
     if(strat==='round'){
-      chosen=candidates.find(p=>p===order[idx%order.length])||candidates[0];
+      chosen=cands.find(p=>p===order[idx%order.length])||cands[0];
       idx=(order.indexOf(chosen)+1)%order.length;
     }else{
-      candidates.sort((a,b)=>totals[a.name]-totals[b.name]||order.indexOf(a)-order.indexOf(b));
-      chosen=candidates[0];
+      cands.sort((a,b)=>totals[a.name]-totals[b.name]||order.indexOf(a)-order.indexOf(b));
+      chosen=cands[0];
     }
-    sched.push({name:chosen.name,start:cur,end:cur+slot,duration:slot});
-    totals[chosen.name]+=slot;cur+=slot;
+    sched.push({name:chosen.name,start:cur,end:cur+slot,duration:slot});totals[chosen.name]+=slot;cur+=slot;
   }
   return {sched,totals};
 }
 
 function render({sched,totals}){
-  currentSchedule=sched; // keep global copy
-  // next shift calc & per‑times
-  const nextMap={},perTimes={},summary={};
-  sched.forEach((s,i)=>{if(nextMap[s.name]!=null)sched[nextMap[s.name]].next=fm(s.start);nextMap[s.name]=i;s.next='-';
+  currentSchedule=sched;
+  const next={},perTimes={},summary={};
+  sched.forEach((s,i)=>{if(next[s.name]!=null)sched[next[s.name]].next=fm(s.start);next[s.name]=i;s.next='-';
     perTimes[s.name]=perTimes[s.name]||[];perTimes[s.name].push(fm(s.start));
-    summary[s.name]=summary[s.name]||{cnt:0,mins:0};summary[s.name].cnt++;summary[s.name].mins+=s.duration;});
-
-  // schedule table
-  const tb=document.querySelector('#schedule-table tbody');tb.innerHTML='';
-  const gaps=[];
-  sched.forEach(s=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${s.name}</td><td>${fm(s.start)}</td><td>${fm(s.end)}</td><td>${s.duration}</td><td>${s.next}</td>`;tb.appendChild(tr);});
-  // highlight gap rows (if cur jumps) – simpler: we detect by comparing contiguous times
-  for(let i=1;i<sched.length;i++)if(sched[i].start>sched[i-1].end){const gapTr=document.createElement('tr');gapTr.className='gap-row';gapTr.innerHTML=`<td colspan=5>*** GAP ${fm(sched[i-1].end)}‑${fm(sched[i].start)} ***</td>`;tb.insertBefore(gapTr,tb.children[i+gaps.length]);gaps.push(gapTr);}
-
-  // summary
-  const sb=document.querySelector('#summary-table tbody');sb.innerHTML='';
-  Object.keys(summary).sort().forEach(n=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${n}</td><td>${summary[n].cnt}</td><td>${summary[n].mins}</td>`;sb.appendChild(tr);});
-
-  // shift times list
-  const stDiv=document.getElementById('shift-times');stDiv.innerHTML='';const ul=document.createElement('ul');
-  Object.keys(perTimes).sort().forEach(n=>{const li=document.createElement('li');li.textContent=`${n}: ${perTimes[n].join(', ')}`;ul.appendChild(li);});
-  stDiv.appendChild(ul);
-
-  // pipe output or table visibility
-  const pipe=document.getElementById('pipe-output');const copyBtn=document.getElementById('copy-table');
-  if(document.getElementById('output-mode').value==='table'){document.getElementById('schedule-table').style.display='';pipe.style.display='none';copyBtn.style.display='inline-block';}
-  else{document.getElementById('schedule-table').style.display='none';copyBtn.style.display='none';pipe.style.display='block';pipe.textContent=sched.map(s=>`${s.name}|${fm(s.start)}|${fm(s.end)}|${s.duration}|${s.next}`).join('\n');}
-
-  // enable export/save buttons
-  ['save-day','export-ics','export-xlsx','export-pdf'].forEach(id=>document.getElementById(id).disabled=false);
-}
-
-genBtn.onclick=()=>{const res=buildSchedule();if(res)render(res);};// generate & render
-
-document.getElementById('copy-table').onclick=()=>{
-  const rows=[...document.querySelectorAll('#schedule-table tr')].map(r=>[...r.children].map(c=>c.textContent).join('\t')).join('\n');
-  navigator.clipboard.writeText(rows).then(()=>alert('Copied table'));
-};
-
-/************ Persistence (localStorage) *************/
-function saveToday(){localStorage.setItem(`sched-${todayKey()}`,JSON.stringify(currentSchedule));refreshHistory();alert('Saved');}
-function refreshHistory(){const sel=document.getElementById('history-select');sel.innerHTML='<option value="">Load previous…</option>';Object.keys(localStorage).filter(k=>k.startsWith('sched-')).sort().forEach(k=>{const d=k.slice(6);const o=document.createElement('option');o.value=d;o.textContent=d;sel.appendChild(o);});}
-refreshHistory();
-
-document.getElementById('save-day').onclick=saveToday;
-document.getElementById('history-select').onchange=e=>{
-  const d=e.target.value;if(!d)return;const data=JSON.parse(localStorage.getItem(`sched-${d}`)||'[]');if(!data.length)return alert('No data');render({sched:data,totals:{}});
-};
-
-/************ iCal export *************/
-function exportICS(){const {ics}=window;const cal=new ics();currentSchedule.forEach((s,i)=>{const d=new Date();d.setHours(Math.floor(s.start/60),s.start%60,0,0);const e=new Date();e.setHours(Math.floor(s.end/60),s.end%60,0,0);cal.addEvent(s.name+' queue',`Shift ${i+1}`, '', d, e);});cal.download(`queue-${todayKey()}`);}document.getElementById('export-ics').onclick=exportICS;
-
-/************ XLSX export *************/
-function exportXLSX(){const ws=XLSX.utils.json_to_sheet(currentSchedule.map(s=>({Person:s.name,Start:fm(s.start),End:fm(s.end),Minutes:s.duration})));
-  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Schedule');XLSX.writeFile(wb,`queue-${todayKey()}.xlsx`);}document.getElementById('export-xlsx').onclick=exportXLSX;
-
-/************ PDF export (simple) *************/
-async function exportPDF(){const {{jsPDF}}=window.jspdf;const doc=new jsPDF();doc.text(`Queue Schedule ${todayKey()}`,14,14);let y=24;currentSchedule.forEach(s=>{doc.text(`${s.name}  ${fm(s.start)}‑${fm(s.end)}  ${s.duration}m`,14,y);y+=6;if(y>270){doc.addPage();y=20;}});doc.save(`queue-${todayKey()}.pdf`);}document.getElementById('export-pdf').onclick=exportPDF;
-</script>
-</body>
-</html>
+    summary[s.name]=summary[s.name]||{cnt:0,mins:0};summary[s.name].cnt++;summary[s
