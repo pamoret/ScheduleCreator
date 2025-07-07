@@ -50,36 +50,85 @@ mgrSel.onchange=e=>{
 };
 
 // ---------- scheduler (unchanged algorithm, no-overlap exports) ----------
-let rotateIdx=0,current=[];
+// ---------- scheduler (weighted fair distribution) ----------
+let rotateIdx = 0, current = [];
+
+// Replace *your* existing buildSchedule() with the version below.
+// It keeps the public API the same but re‑balances work using a
+// weighted‑fair algorithm.  Every time‑slot is first *virtually*
+// shared equally between everyone who is on‑line; this produces a
+// per‑person "target" minute‑count.  When we then assign the *real*
+// slot, we always give it to whoever is furthest *below* their
+// target‑to‑date, guaranteeing that the final totals converge on the
+// fairest possible distribution even when fewer people are on duty at
+// the edges of the day.
 
 function buildSchedule(){
+  // 1. Build the roster the same way as before
   const roster=[...document.querySelectorAll('.member-row')]
     .filter(r=>r.querySelector('.avail').checked)
     .map(r=>({name:r.querySelector('.pname').value.trim()||'Unnamed',
               start:toM(r.querySelector('.pstart').value),
               end:toM(r.querySelector('.pend').value)}));
+
   if(!roster.length){alert('No members');return null;}
 
+  // 2. Rotation / randomisation unchanged
   let order=[...roster];
   if($('order-mode').value==='random')order.sort(()=>Math.random()-0.5);
   else{const rot=rotateIdx++%order.length;order=order.slice(rot).concat(order.slice(0,rot));}
 
-  const mLen= +$('morning-len').value||6, aLen= +$('afternoon-len').value||15;
+  const mLen = +$('morning-len').value||6;   // before 12:00 ET
+  const aLen = +$('afternoon-len').value||15; // after 12:00 ET
   const strat=$('strategy-mode').value;
-  const earliest=Math.min(...roster.map(r=>r.start)), latest=Math.max(...roster.map(r=>r.end));
-  const totals=Object.fromEntries(roster.map(r=>[r.name,0])), sched=[]; let idx=0,cur=earliest;
+
+  const earliest=Math.min(...roster.map(r=>r.start)),
+        latest  =Math.max(...roster.map(r=>r.end));
+
+  // 3. *** NEW SECTION *** – work out how many *minutes* each person
+  //    *should* do, given their availability and the competition in
+  //    each slot.
+  const targets=Object.fromEntries(roster.map(r=>[r.name,0]));
+  for(let t=earliest;t<latest;){
+    const len   = t<720 ? mLen : aLen;
+    const avail = roster.filter(p=>p.start<=t && p.end>=t+len);
+
+    if(!avail.length){                 // No‑one on duty – jump to next start
+      t=Math.min(...roster.filter(p=>p.start>t).map(p=>p.start).concat([latest]));
+      continue;
+    }
+
+    const share=len/avail.length;      // Every on‑line person "owns" this slice equally
+    avail.forEach(p=>targets[p.name]+=share);
+    t+=len;                            // Move to next slice
+  }
+
+  // 4. Generate the real schedule, preferentially picking the person
+  //    with the lowest *actual/target* ratio so far
+  const totals=Object.fromEntries(roster.map(r=>[r.name,0]));
+  const sched=[]; let idx=0,cur=earliest;
 
   while(cur<latest){
     const slot=cur<720?mLen:aLen;
-    const can=order.filter(p=>p.start<=cur&&p.end>=cur+slot);
+    const can = order.filter(p=>p.start<=cur && p.end>=cur+slot);
+
     if(!can.length){cur=Math.min(...roster.filter(p=>p.start>cur).map(p=>p.start).concat([latest]));continue;}
 
     let chosen;
-    if(strat==='round'){chosen=can.find(p=>p===order[idx%order.length])||can[0];idx=(order.indexOf(chosen)+1)%order.length;}
-    else{chosen=can.sort((a,b)=>totals[a.name]-totals[b.name]||order.indexOf(a)-order.indexOf(b))[0];}
+    if(strat==='round'){
+      chosen=can.find(p=>p===order[idx%order.length])||can[0];
+      idx=(order.indexOf(chosen)+1)%order.length;
+    }else{ // strat === 'fair' (default)
+      chosen=can.sort((a,b)=>{
+        const aScore=(totals[a.name]   / targets[a.name])||0;
+        const bScore=(totals[b.name]   / targets[b.name])||0;
+        return aScore-bScore || order.indexOf(a)-order.indexOf(b);
+      })[0];
+    }
 
     sched.push({name:chosen.name,start:cur,end:cur+slot,duration:slot});
-    totals[chosen.name]+=slot;cur+=slot;
+    totals[chosen.name]+=slot;
+    cur+=slot;
   }
   return sched;
 }
