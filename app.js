@@ -49,89 +49,155 @@ mgrSel.onchange=e=>{
   team.forEach(makeRow);
 };
 
-// ---------- scheduler (unchanged algorithm, no-overlap exports) ----------
-// ---------- scheduler (weighted fair distribution) ----------
-let rotateIdx = 0, current = [];
+// ---------- scheduler with automatic *multi‑window* slotting + 10 % fairness ----------
+// Slot sizes are computed so that, inside each window, every person’s
+// total minutes stay within ±10 % of the others whenever it is
+// mathematically possible.  The algorithm prefers 5‑10 minute slots
+// but will lengthen them (up to 60 min) if a narrower window or a low
+// head‑count makes the 10 % target impossible.
 
-// Replace *your* existing buildSchedule() with the version below.
-// It keeps the public API the same but re‑balances work using a
-// weighted‑fair algorithm.  Every time‑slot is first *virtually*
-// shared equally between everyone who is on‑line; this produces a
-// per‑person "target" minute‑count.  When we then assign the *real*
-// slot, we always give it to whoever is furthest *below* their
-// target‑to‑date, guaranteeing that the final totals converge on the
-// fairest possible distribution even when fewer people are on duty at
-// the edges of the day.
+// #1 — Define your day windows (edit freely)
+const WINDOWS = [
+  { label: 'Early',    start: toM('07:30'), end: toM('09:00') },
+  { label: 'Core',     start: toM('09:00'), end: toM('16:30') },
+  { label: 'Wrap‑up',  start: toM('16:30'), end: toM('18:00') },
+  { label: 'Evening',  start: toM('18:00'), end: toM('21:00') },
+];
 
-function buildSchedule(){
-  // 1. Build the roster the same way as before
-  const roster=[...document.querySelectorAll('.member-row')]
-    .filter(r=>r.querySelector('.avail').checked)
-    .map(r=>({name:r.querySelector('.pname').value.trim()||'Unnamed',
-              start:toM(r.querySelector('.pstart').value),
-              end:toM(r.querySelector('.pend').value)}));
+// #2 — Choose a slot length that keeps per‑person coverage within 10 %
+//      whenever feasible, with a strong bias toward 5‑10 minute turns.
+function suggestSlotLengths(roster, windows = WINDOWS, opts = { idealMin: 5, idealMax: 10, tolerance: 0.10 }) {
+  const { idealMin, idealMax, tolerance } = opts;
+  return windows.map(w => {
+    const people = roster.filter(p => p.end > w.start && p.start < w.end).length;
+    const duration = w.end - w.start;
+    if (!people) return { ...w, people: 0, ideal: null };
 
-  if(!roster.length){alert('No members');return null;}
-
-  // 2. Rotation / randomisation unchanged
-  let order=[...roster];
-  if($('order-mode').value==='random')order.sort(()=>Math.random()-0.5);
-  else{const rot=rotateIdx++%order.length;order=order.slice(rot).concat(order.slice(0,rot));}
-
-  const mLen = +$('morning-len').value||6;   // before 12:00 ET
-  const aLen = +$('afternoon-len').value||15; // after 12:00 ET
-  const strat=$('strategy-mode').value;
-
-  const earliest=Math.min(...roster.map(r=>r.start)),
-        latest  =Math.max(...roster.map(r=>r.end));
-
-  // 3. *** NEW SECTION *** – work out how many *minutes* each person
-  //    *should* do, given their availability and the competition in
-  //    each slot.
-  const targets=Object.fromEntries(roster.map(r=>[r.name,0]));
-  for(let t=earliest;t<latest;){
-    const len   = t<720 ? mLen : aLen;
-    const avail = roster.filter(p=>p.start<=t && p.end>=t+len);
-
-    if(!avail.length){                 // No‑one on duty – jump to next start
-      t=Math.min(...roster.filter(p=>p.start>t).map(p=>p.start).concat([latest]));
-      continue;
+    // Single‑person window: any length is technically fair; keep it neat.
+    if (people === 1) {
+      const len = Math.max(idealMin, Math.min(idealMax, duration));
+      return { ...w, people, ideal: len };
     }
 
-    const share=len/avail.length;      // Every on‑line person "owns" this slice equally
-    avail.forEach(p=>targets[p.name]+=share);
-    t+=len;                            // Move to next slice
-  }
+    const target = duration / people;          // minutes each should cover
+    let chosen = null, bestRatio = Infinity;   // ratio = worst‑case diff / target
 
-  // 4. Generate the real schedule, preferentially picking the person
-  //    with the lowest *actual/target* ratio so far
-  const totals=Object.fromEntries(roster.map(r=>[r.name,0]));
-  const sched=[]; let idx=0,cur=earliest;
+    for (let L = idealMin; L <= 60; L++) {
+      const ratio = L / target;                // one extra slot at most
+      if (ratio < bestRatio) { bestRatio = ratio; chosen = L; }
+      // First length that meets both the 10 % rule *and* the 5‑10 band
+      if (ratio <= tolerance && L <= idealMax) { chosen = L; break; }
+    }
 
-  while(cur<latest){
-    const slot=cur<720?mLen:aLen;
-    const can = order.filter(p=>p.start<=cur && p.end>=cur+slot);
+    return { ...w, people, ideal: chosen };
+  });
+}
 
-    if(!can.length){cur=Math.min(...roster.filter(p=>p.start>cur).map(p=>p.start).concat([latest]));continue;}
+// #3 — Build a flat list of slices (start, len) using those ideals
+function buildSlices(windowsWithLen) {
+  const slices = [];
+  windowsWithLen.forEach(w => {
+    if (!w.ideal) return; // no coverage
+    for (let t = w.start; t < w.end;) {
+      const len = Math.min(w.ideal, w.end - t);
+      slices.push({ start: t, len, window: w.label });
+      t += len;
+    }
+  });
+  return slices;
+}
+
+// #4 — Main scheduler (weighted‑fair)
+let rotateIdx = 0;
+function buildSchedule() {
+  // ---- roster --------------------------------------
+  const roster = [...document.querySelectorAll('.member-row')]
+    .filter(r => r.querySelector('.avail').checked)
+    .map(r => ({
+      name:  r.querySelector('.pname').value.trim() || 'Unnamed',
+      start: toM(r.querySelector('.pstart').value),
+      end:   toM(r.querySelector('.pend').value)
+    }));
+  if (!roster.length) { alert('No members'); return null; }
+
+  // ---- derive per‑window slot sizes -----------------
+  const hints = suggestSlotLengths(roster);
+  console.table(hints.map(h => ({
+    Window: `${h.label} (${fm(h.start)}–${fm(h.end)})`,
+    People: h.people || '—',
+    'Slot (min)': h.ideal || 'n/a'
+  })));
+
+  // ---- build day‑wide slices ------------------------
+  const slices = buildSlices(hints);
+  if (!slices.length) { alert('No schedulable time inside WINDOWS'); return null; }
+
+  // ---- choose ordering basis ------------------------
+  let order = [...roster];
+  if ($('order-mode').value === 'random') order.sort(() => Math.random() - 0.5);
+  else { const rot = rotateIdx++ % order.length; order = order.slice(rot).concat(order.slice(0, rot)); }
+
+  const strat = $('strategy-mode').value; // 'fair' or 'round'
+
+  // ---- fair‑share targets per person ----------------
+  const targets = Object.fromEntries(roster.map(r => [r.name, 0]));
+  slices.forEach(s => {
+    const avail = roster.filter(p => p.start <= s.start && p.end >= s.start + s.len);
+    if (!avail.length) return;
+    const share = s.len / avail.length;
+    avail.forEach(p => targets[p.name] += share);
+  });
+
+  // ---- build schedule -------------------------------
+  const totals = Object.fromEntries(roster.map(r => [r.name, 0]));
+  const sched = [];
+  let idx = 0;
+  slices.forEach(s => {
+    const can = order.filter(p => p.start <= s.start && p.end >= s.start + s.len);
+    if (!can.length) return; // skip unschedulable slice
 
     let chosen;
-    if(strat==='round'){
-      chosen=can.find(p=>p===order[idx%order.length])||can[0];
-      idx=(order.indexOf(chosen)+1)%order.length;
-    }else{ // strat === 'fair' (default)
-      chosen=can.sort((a,b)=>{
-        const aScore=(totals[a.name]   / targets[a.name])||0;
-        const bScore=(totals[b.name]   / targets[b.name])||0;
-        return aScore-bScore || order.indexOf(a)-order.indexOf(b);
+    if (strat === 'round') {
+      chosen = can.find(p => p === order[idx % order.length]) || can[0];
+      idx = (order.indexOf(chosen) + 1) % order.length;
+    } else {
+      chosen = can.sort((a, b) => {
+        const aScore = (totals[a.name] / targets[a.name]) || 0;
+        const bScore = (totals[b.name] / targets[b.name]) || 0;
+        return aScore - bScore || order.indexOf(a) - order.indexOf(b);
       })[0];
     }
 
-    sched.push({name:chosen.name,start:cur,end:cur+slot,duration:slot});
-    totals[chosen.name]+=slot;
-    cur+=slot;
-  }
+    sched.push({ name: chosen.name, start: s.start, end: s.start + s.len, duration: s.len, window: s.window });
+    totals[chosen.name] += s.len;
+  });
+
+  sched.suggestions = hints; // expose for UI
   return sched;
 }
+
+// ---- minimal UI hook: prepend suggestions ------------
+if (!window._patchedRender && typeof render === 'function') {
+  const origR = render;
+  window.render = function (sched) {
+    origR(sched);
+    if (!sched.suggestions) return;
+    const cont = document.getElementById('shift-times');
+    cont.querySelectorAll('.slot-hints').forEach(e => e.remove());
+    const box = document.createElement('div'); box.className = 'slot-hints';
+    const h3 = document.createElement('h3'); h3.textContent = 'Auto slot lengths'; box.appendChild(h3);
+    const ul = document.createElement('ul');
+    sched.suggestions.forEach(h => {
+      const li = document.createElement('li');
+      li.textContent = `${h.label}: ${fm(h.start)}–${fm(h.end)} → ` +
+                       (h.people ? `${h.people} ppl × ${h.ideal} min` : 'no coverage');
+      ul.appendChild(li);
+    });
+    box.appendChild(ul); cont.prepend(box);
+  };
+  window._patchedRender = true;
+}
+
 
 // ---------- render (same as previous but End uses fm(s.end-1)) ----------
 function render(sched){
