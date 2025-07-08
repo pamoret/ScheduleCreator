@@ -31,7 +31,6 @@ function makeRow([name,s,e]=['','09:00','17:00']){
     <input class="pname" style="width:120px" value="${name}" placeholder="Name">
     Start:<input type="time" class="pstart" value="${s}">
     End:<input type="time"   class="pend"  value="${e}">`;
-  // drag
   row.draggable=true;
   row.ondragstart=ev=>{window._drag=row;row.classList.add('dragging');ev.dataTransfer.effectAllowed='move';};
   row.ondrop=()=>{const d=window._drag;if(d&&d!==row)formDiv.insertBefore(d,row.nextSibling);row.classList.remove('over');};
@@ -50,23 +49,20 @@ mgrSel.onchange=e=>{
 };
 
 // ---------- scheduler with exclusivity-aware fairness + safe hand-off ----------
-// Goals
-//   • Keep everyone within ±10 % of each other *per window* **and** across the whole day.
-//   • People who must solo-cover a window (e.g. 18:00-21:00) are *pre-credited* with
-//     those minutes so they aren’t over-used earlier.
-//   • Avoid assigning anyone during the final 15 min of their shift unless no one
-//     else can take it.
 
 // ---------------- editable knobs ---------------------
 const WINDOWS = [
-  { label: 'Early',    start: toM('07:30'), end: toM('09:00') },
-  { label: 'Core',     start: toM('09:00'), end: toM('16:30') },
-  { label: 'Wrap-up',  start: toM('16:30'), end: toM('18:00') },
-  { label: 'Evening',  start: toM('18:00'), end: toM('21:00') },
+  { label: 'Early',         start: toM('07:30'), end: toM('09:00') },
+  { label: 'Core (Early)',  start: toM('09:00'), end: toM('12:00') },
+  { label: 'Core (Mid)',    start: toM('12:00'), end: toM('14:00') },
+  { label: 'Core (Late)',   start: toM('14:00'), end: toM('16:30') },
+  { label: 'Wrap-up',       start: toM('16:30'), end: toM('18:00') },
+  { label: 'Evening',       start: toM('18:00'), end: toM('21:00') },
 ];
-const END_BUFFER = 15;                     // keep last 15 min free
-const FAIR_TOLERANCE = 0.10;               // ±10 %
-const IDEAL_MIN = 5, IDEAL_MAX = 15;       // bias 5-10, hard-cap 15 min
+const END_BUFFER      = 15;          // keep last 15 min free
+const FAIR_TOLERANCE  = 0.10;        // ±10 %
+const IDEAL_MIN = 5, IDEAL_MAX = 15; // 5-10 ideal, 15 hard cap
+const AFTERNOON_LIMIT_WINDOWS = ['Core (Mid)','Core (Late)','Wrap-up']; // where we throttle the evening person
 
 // ------------- choose slot length per window --------
 function suggestSlotLengths(roster, windows = WINDOWS) {
@@ -75,141 +71,146 @@ function suggestSlotLengths(roster, windows = WINDOWS) {
     const duration = w.end - w.start;
     if (!people) return { ...w, people: 0, ideal: null };
 
-    // 1-person window → whatever neat value fits bias
     if (people === 1) {
       const len = Math.max(IDEAL_MIN, Math.min(IDEAL_MAX, duration));
       return { ...w, people, ideal: len };
     }
 
-    const target = duration / people; // minutes each should cover
-    for (let L = IDEAL_MIN; L <= IDEAL_MAX; L++) {          // ← capped at 15
-      const ratio = L / target;                             // worst-case diff if someone gets one extra slot
-      if (ratio <= FAIR_TOLERANCE) return { ...w, people, ideal: L };
+    const target = duration / people;
+    for (let L = IDEAL_MIN; L <= IDEAL_MAX; L++) {
+      if ((L / target) <= FAIR_TOLERANCE) return { ...w, people, ideal: L };
     }
-    // Fallback: pick shortest that meets tolerance but never exceed IDEAL_MAX
     let L = IDEAL_MIN;
-    while (L / target > FAIR_TOLERANCE && L < IDEAL_MAX) L++;
+    while ((L / target) > FAIR_TOLERANCE && L < IDEAL_MAX) L++;
     return { ...w, people, ideal: L };
   });
 }
 
 // ------------- slice generator ----------------------
-function buildSlices(windowsWithLen) {
-  const slices = [];
-  windowsWithLen.forEach(w => {
-    if (!w.ideal) return;
-    for (let t = w.start; t < w.end;) {
-      const len = Math.min(w.ideal, w.end - t);
-      slices.push({ start: t, len, window: w.label });
-      t += len;
+function buildSlices(windowsWithLen){
+  const out=[];
+  windowsWithLen.forEach(w=>{
+    if(!w.ideal) return;
+    for(let t=w.start;t<w.end;){
+      const len=Math.min(w.ideal,w.end-t);
+      out.push({start:t,len,window:w.label});
+      t+=len;
     }
   });
-  return slices;
+  return out;
 }
 
 // ------------- main builder -------------------------
-let rotateIdx = 0;
-function buildSchedule() {
-  // --- roster ---------------------------------------
-  const roster = [...document.querySelectorAll('.member-row')]
-    .filter(r => r.querySelector('.avail').checked)
-    .map(r => ({
-      name:  r.querySelector('.pname').value.trim() || 'Unnamed',
-      start: toM(r.querySelector('.pstart').value),
-      end:   toM(r.querySelector('.pend').value)
-    }));
-  if (!roster.length) { alert('No members'); return null; }
+let rotateIdx=0;
+function buildSchedule(){
+  // roster
+  const roster=[...document.querySelectorAll('.member-row')]
+    .filter(r=>r.querySelector('.avail').checked)
+    .map(r=>({name:r.querySelector('.pname').value.trim()||'Unnamed',
+              start:toM(r.querySelector('.pstart').value),
+              end:toM(r.querySelector('.pend').value)}));
+  if(!roster.length){alert('No members');return null;}
 
-  // --- slot lengths ---------------------------------
-  const hints  = suggestSlotLengths(roster);
-  const slices = buildSlices(hints);
-  if (!slices.length) { alert('No schedulable time inside WINDOWS'); return null; }
+  // slot lengths
+  const hints=suggestSlotLengths(roster);
+  const slices=buildSlices(hints);
+  if(!slices.length){alert('No schedulable time');return null;}
 
-  // --- rotational order -----------------------------
-  let order = [...roster];
-  if ($('order-mode').value === 'random') order.sort(() => Math.random() - 0.5);
-  else { const rot = rotateIdx++ % order.length; order = order.slice(rot).concat(order.slice(0, rot)); }
-  const strat = $('strategy-mode').value;
+  // rotation
+  let order=[...roster];
+  if($('order-mode').value==='random')order.sort(()=>Math.random()-0.5);
+  else{const rot=rotateIdx++%order.length;order=order.slice(rot).concat(order.slice(0,rot));}
+  const strat=$('strategy-mode').value;
 
-  // --- helper: availability predicates --------------
-  const prefAvail = (p, s) => p.start <= s.start && (s.start + s.len) <= (p.end - END_BUFFER);
-  const allAvail  = (p, s) => p.start <= s.start && p.end >= s.start + s.len;
+  // helpers
+  const prefAvail=(p,s)=>p.start<=s.start && (s.start+s.len)<=p.end-END_BUFFER;
+  const allAvail =(p,s)=>p.start<=s.start && p.end>=s.start+s.len;
 
-  // --- pre-assign mandatory solo slices -------------
-  const totals  = Object.fromEntries(roster.map(r => [r.name, 0]));
-  const sched   = [];
-  const rem     = [];
-  slices.forEach(s => {
-    const pref = roster.filter(p => prefAvail(p, s));
-    const all  = pref.length ? pref : roster.filter(p => allAvail(p, s));
-    if (all.length === 1) {
-      const chosen = all[0];
-      sched.push({ ...s, name: chosen.name, end: s.start + s.len, duration: s.len });
-      totals[chosen.name] += s.len;
-    } else {
-      rem.push({ ...s, pref, all });
+  // -------- evening-person detection + counts --------
+  let eveningPerson=null;
+  const windowCount={}; // person -> window -> #
+  const inc=(n,w)=>{(windowCount[n]??={})[w]=(windowCount[n][w]??0)+1;};
+
+  // pre-assign mandatory solo slices
+  const totals=Object.fromEntries(roster.map(r=>[r.name,0]));
+  const sched=[],rem=[];
+  slices.forEach(s=>{
+    const pref=roster.filter(p=>prefAvail(p,s));
+    const all =pref.length?pref:roster.filter(p=>allAvail(p,s));
+    if(all.length===1){
+      const ch=all[0];
+      sched.push({...s,name:ch.name,end:s.start+s.len,duration:s.len});
+      totals[ch.name]+=s.len; inc(ch.name,s.window);
+      if(s.window==='Evening') eveningPerson=ch.name;
+    }else{
+      rem.push({...s,pref,all});
     }
   });
 
-  // --- compute global fair targets ------------------
-  const targets = Object.fromEntries(roster.map(r => [r.name, 0]));
-  slices.forEach(s => {
-    const avail = roster.filter(p => allAvail(p, s));
-    if (!avail.length) return;
-    const share = s.len / avail.length;
-    avail.forEach(p => targets[p.name] += share);
+  // fair targets
+  const targets=Object.fromEntries(roster.map(r=>[r.name,0]));
+  slices.forEach(s=>{
+    const avail=roster.filter(p=>allAvail(p,s));
+    const share=s.len/avail.length;
+    avail.forEach(p=>targets[p.name]+=share);
   });
 
-  // --- schedule remaining slices --------------------
-  let idx = 0;
-  rem.sort((a, b) => a.start - b.start).forEach(s => {
-    const cand = s.pref.length ? s.pref : s.all;
-    if (!cand.length) return; // unschedulable
+  // schedule remaining
+  let idx=0;
+  rem.sort((a,b)=>a.start-b.start).forEach(s=>{
+    let cand=s.pref.length?s.pref:s.all;
+    // throttle evening person in afternoon windows
+    if(eveningPerson && AFTERNOON_LIMIT_WINDOWS.includes(s.window)){
+      const caps=windowCount[eveningPerson]?.[s.window]||0;
+      if(caps>=1 && cand.length>1) cand=cand.filter(p=>p.name!==eveningPerson);
+    }
+    if(!cand.length)return;
 
     let chosen;
-    if (strat === 'round') {
-      chosen = cand.find(p => p === order[idx % order.length]) || cand[0];
-      idx = (order.indexOf(chosen) + 1) % order.length;
-    } else {
-      // score by *global* fairness only — window fairness already implicit in targets
-      chosen = cand.sort((a, b) => {
-        const aScore = (totals[a.name] / targets[a.name]) || 0;
-        const bScore = (totals[b.name] / targets[b.name]) || 0;
-        return aScore - bScore || order.indexOf(a) - order.indexOf(b);
+    if(strat==='round'){
+      chosen=cand.find(p=>p===order[idx%order.length])||cand[0];
+      idx=(order.indexOf(chosen)+1)%order.length;
+    }else{
+      chosen=cand.sort((a,b)=>{
+        const as=(totals[a.name]/targets[a.name])||0;
+        const bs=(totals[b.name]/targets[b.name])||0;
+        return as-bs || order.indexOf(a)-order.indexOf(b);
       })[0];
     }
 
-    sched.push({ ...s, name: chosen.name, end: s.start + s.len, duration: s.len });
-    totals[chosen.name] += s.len;
+    sched.push({...s,name:chosen.name,end:s.start+s.len,duration:s.len});
+    totals[chosen.name]+=s.len; inc(chosen.name,s.window);
   });
 
-  // --- tidy chronology --------------------------------
-  sched.sort((a, b) => a.start - b.start);
-  sched.suggestions = hints;
+  sched.sort((a,b)=>a.start-b.start);
+  sched.suggestions=hints;
   return sched;
 }
 
-// ------------------- UI patch ------------------------
-if (!window._patchedRender && typeof render === 'function') {
-  const origR = render;
-  window.render = function (sched) {
-    origR(sched);
-    if (!sched || !sched.suggestions) return;
-    const cont = document.getElementById('shift-times');
-    cont.querySelectorAll('.slot-hints').forEach(e => e.remove());
-    const box = document.createElement('div'); box.className = 'slot-hints';
-    const h3 = document.createElement('h3'); h3.textContent = 'Auto slot lengths'; box.appendChild(h3);
-    const ul = document.createElement('ul');
-    sched.suggestions.forEach(h => {
-      const li = document.createElement('li');
-      li.textContent = `${h.label}: ${fm(h.start)}–${fm(h.end)} → ` +
-                       (h.people ? `${h.people} ppl × ${h.ideal} min` : 'no coverage');
+// ------------------- UI patch (unchanged) ------------------------
+if(!window._patchedRender && typeof render==='function'){
+  const orig=render;
+  window.render=function(sched){
+    orig(sched);
+    if(!sched||!sched.suggestions)return;
+    const cont=$('shift-times');
+    cont.querySelectorAll('.slot-hints').forEach(e=>e.remove());
+    const box=document.createElement('div');box.className='slot-hints';
+    box.innerHTML='<h3>Auto slot lengths</h3>';
+    const ul=document.createElement('ul');
+    sched.suggestions.forEach(h=>{
+      const li=document.createElement('li');
+      li.textContent=`${h.label}: ${fm(h.start)}–${fm(h.end)} → `+
+                     (h.people?`${h.people} ppl × ${h.ideal} min`:'no coverage');
       ul.appendChild(li);
     });
-    box.appendChild(ul); cont.prepend(box);
+    box.appendChild(ul);cont.prepend(box);
   };
-  window._patchedRender = true;
+  window._patchedRender=true;
 }
+
+// ---------- render … (unchanged below this line) ----------
+/* … keep the rest of the file exactly as before … */
 
 // ---------- render (same as previous but End uses fm(s.end-1)) ----------
 function render(sched){
