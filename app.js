@@ -125,10 +125,9 @@ function buildSchedule() {
   const slices = buildSlices(hints);
   if (!slices.length) { alert('No schedulable time inside WINDOWS'); return null; }
 
-  // --- rotational order -----------------------------
+  // --- randomized order to avoid bias ----------------
   let order = [...roster];
-  if ($('order-mode').value === 'random') order.sort(() => Math.random() - 0.5);
-  else { const rot = rotateIdx++ % order.length; order = order.slice(rot).concat(order.slice(0, rot)); }
+  order.sort(() => Math.random() - 0.5);
   const strat = $('strategy-mode').value;
 
   // --- helper: availability predicates --------------
@@ -185,6 +184,39 @@ function buildSchedule() {
 
   // --- tidy chronology --------------------------------
   sched.sort((a, b) => a.start - b.start);
+
+  // --- Post-processing balancer -----------------------
+  function getTotals(sched) {
+    const t = {};
+    sched.forEach(s => { t[s.name] = (t[s.name] || 0) + s.duration; });
+    return t;
+  }
+  let changed = true;
+  let loopCount = 0;
+  while (changed && loopCount < 100) { // prevent infinite loop
+    changed = false;
+    loopCount++;
+    const totalsNow = getTotals(sched);
+    const names = Object.keys(totalsNow);
+    const minName = names.reduce((a, b) => totalsNow[a] < totalsNow[b] ? a : b);
+    const maxName = names.reduce((a, b) => totalsNow[a] > totalsNow[b] ? a : b);
+    const minVal = totalsNow[minName];
+    const maxVal = totalsNow[maxName];
+    if (maxVal - minVal <= Math.ceil((maxVal + minVal) * FAIR_TOLERANCE)) break;
+    // Try to find a slot assigned to maxName that minName could take
+    for (let i = 0; i < sched.length; ++i) {
+      const s = sched[i];
+      if (s.name === maxName) {
+        // Find the person in roster for minName
+        const minPerson = roster.find(p => p.name === minName);
+        if (minPerson && minPerson.start <= s.start && minPerson.end >= s.end) {
+          sched[i] = { ...s, name: minName };
+          changed = true;
+          break;
+        }
+      }
+    }
+  }
   sched.suggestions = hints;
   return sched;
 }
